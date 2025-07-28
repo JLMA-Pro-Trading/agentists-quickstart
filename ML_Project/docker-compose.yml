@@ -1,0 +1,218 @@
+# Enhanced Universal Trading Syndicate - Production Stack
+# Educational Trading System with Full Infrastructure
+
+version: '3.8'
+
+services:
+  # Main Trading Application
+  trading-app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+      - "8001:8001"  # WebSocket port
+    environment:
+      - TRADING_MODE=paper
+      - SECURITY_LEVEL=educational
+      - DATABASE_URL=postgresql://trading_user:trading_password@postgres:5432/trading_db
+      - REDIS_URL=redis://redis:6379/0
+      - VAULT_URL=http://vault:8200
+      - BINANCE_TESTNET=true
+      - LIVE_TRADING_DISABLED=true
+    depends_on:
+      - postgres
+      - redis
+      - vault
+    volumes:
+      - ./logs:/app/logs
+      - ./data:/app/data
+    networks:
+      - trading-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      - POSTGRES_DB=trading_db
+      - POSTGRES_USER=trading_user
+      - POSTGRES_PASSWORD=trading_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - trading-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trading_user -d trading_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - trading-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  # HashiCorp Vault (Security)
+  vault:
+    image: vault:1.15
+    cap_add:
+      - IPC_LOCK
+    ports:
+      - "8200:8200"
+    environment:
+      - VAULT_DEV_ROOT_TOKEN_ID=educational-root-token
+      - VAULT_DEV_LISTEN_ADDRESS=0.0.0.0:8200
+      - VAULT_ADDR=http://0.0.0.0:8200
+    volumes:
+      - vault_data:/vault/data
+      - ./vault/policies:/vault/policies
+    networks:
+      - trading-network
+    restart: unless-stopped
+    command: ["vault", "server", "-dev", "-dev-listen-address=0.0.0.0:8200"]
+
+  # Observatory Dashboard
+  dashboard:
+    build:
+      context: ./observatory
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - REACT_APP_API_URL=http://localhost:8000
+      - REACT_APP_WS_URL=ws://localhost:8001
+      - REACT_APP_EDUCATIONAL_MODE=true
+    depends_on:
+      - trading-app
+    networks:
+      - trading-network
+    restart: unless-stopped
+
+  # Prometheus Monitoring
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--web.enable-lifecycle'
+    networks:
+      - trading-network
+    restart: unless-stopped
+
+  # Grafana Dashboards
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3001:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=trading_admin
+      - GF_INSTALL_PLUGINS=grafana-clock-panel,grafana-simple-json-datasource
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards
+      - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources
+    depends_on:
+      - prometheus
+    networks:
+      - trading-network
+    restart: unless-stopped
+
+  # WebSocket Service for Real-time Updates
+  websocket-service:
+    build:
+      context: .
+      dockerfile: Dockerfile.websocket
+    ports:
+      - "8002:8002"
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - EDUCATIONAL_MODE=true
+    depends_on:
+      - redis
+    networks:
+      - trading-network
+    restart: unless-stopped
+
+  # Background Task Worker
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "-m", "celery", "worker", "-A", "tasks.celery_app", "--loglevel=info"]
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+      - DATABASE_URL=postgresql://trading_user:trading_password@postgres:5432/trading_db
+      - EDUCATIONAL_MODE=true
+    depends_on:
+      - redis
+      - postgres
+    volumes:
+      - ./logs:/app/logs
+    networks:
+      - trading-network
+    restart: unless-stopped
+
+  # Task Scheduler
+  scheduler:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "-m", "celery", "beat", "-A", "tasks.celery_app", "--loglevel=info"]
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/1
+      - EDUCATIONAL_MODE=true
+    depends_on:
+      - redis
+    volumes:
+      - ./logs:/app/logs
+    networks:
+      - trading-network
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
+  vault_data:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  trading-network:
+    driver: bridge
+
+# Educational Trading Constraints
+# This docker-compose file is configured for educational use only
+# - All trading operations are paper-only
+# - Binance testnet endpoints only
+# - No live API keys or real trading
+# - Complete monitoring and transparency
